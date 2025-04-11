@@ -1,0 +1,15 @@
+<launch>
+    <node name="thermal_node" pkg="genicam" type="genicam_node" output="screen" >
+        <param name="publish_topic" type="string" value="thermal_front"/>
+        <!-- 开启PTP同步之后可以使用device时间 -->
+        <param name="use_device_time" type="bool" value="False" />
+        <param name="gev_packet_size" type="int" value="8228" />
+        <param name="vis_img" type="bool" value="False"/>
+        <param name="externalsync" type="bool" value="True"/>
+        <param name="identify_str" type="string" value="TWIN612-06250001"/>
+        <param name="pixel_format" type="string" value="YUV422_8" />
+        <!-- Palette:IronRed比较好看, WhiteHot比较稳定 -->
+        <!-- <param name="palette" type="string" value="WhiteHot" />  -->
+        <param name="palette" type="string" value="IronRed" /> 
+    </node>
+</launch>
