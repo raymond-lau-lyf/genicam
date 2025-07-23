@@ -286,99 +286,90 @@ int main(int argc, char **argv){
     ROS_INFO("publish_topic: %s",params.publish_topic.c_str());
     // std::cout << params.binning_h << std::endl; 
     const double timeout_sec = 3.0;
-    arv_update_device_list();
-    int n_devices = arv_get_n_devices();
-    int found_device_id = -1;
     ros::Time start_time = ros::Time::now();
+    bool connected = false;
     
-    ROS_INFO("Waiting for camera with IP: %s", params.identify_str.c_str());
+    ROS_INFO("Waiting for camera at IP: %s", params.identify_str.c_str());
     
     while ((ros::Time::now() - start_time).toSec() < timeout_sec) {
-
-    
-        for(int i = 0;i < n_devices;++i){
-            std::string device_string = std::string(arv_get_device_id(i)) + " (" + arv_get_device_address(i)+")";
-            // std::cout << device_id << std::endl;
-            ROS_INFO("found camera: %s",device_string.c_str());
-            if(device_string.find(params.identify_str) != std::string::npos){
-                ROS_INFO("match identify_str: %s",params.identify_str.c_str());
-                found_device_id = i;
+        ArvDevice* camera_device = arv_open_device(params.identify_str.c_str(), &error);
+        if (camera_device != nullptr) {
+            camera = arv_camera_new_with_device(camera_device, &error);
+            if (ARV_IS_CAMERA(camera)) {
+                connected = true;
                 break;
+            } else {
+                g_clear_object(&camera_device);  // 安全清理
             }
         }
-        if (found_device_id != -1) break;
-        // ros::Duration(0.2).sleep();
+        ros::Duration(0.2).sleep();
     }
     
-    if (found_device_id == -1) {
-        ROS_ERROR("Timeout: Camera with IP %s not found after %.1f seconds.", params.identify_str.c_str(), timeout_sec);
+    if (!connected) {
+        ROS_ERROR("Timeout: Failed to connect to camera at IP %s within %.1f seconds.",
+                  params.identify_str.c_str(), timeout_sec);
         return -1;
     }
     
+    
     ROS_INFO("Successfully initialized camera from IP: %s", params.identify_str.c_str());
-    if(found_device_id != -1){
-        ArvDevice* camera_device = arv_open_device(arv_get_device_id(found_device_id), &error);
-        camera = arv_camera_new_with_device(camera_device, &error);
-        // arv_camera_gv_set_packet_size(camera, 8169, &error);
-        if(ARV_IS_CAMERA(camera)){
-            int width;
-		    int height;
-            double gain;
-		    std::string current_pixel_format = "unKnown";
-            ROS_INFO("opening camera %s", arv_camera_get_model_name (camera, NULL));
-            update_camera_params(camera, &error);
-            if (!error) width = arv_camera_get_integer(camera, "Width", &error);
-            if (!error) height = arv_camera_get_integer(camera, "Height", &error);
-            if (!error) current_pixel_format = arv_camera_get_pixel_format_as_string(camera, &error);
-            if (!error && params.gain > 0) gain = arv_camera_get_float(camera, "Gain", &error);
-            ROS_INFO("resolution: %d x %d", width, height);
-            if (params.gain > 0) ROS_INFO("Gain: %lf", gain);
-            ROS_INFO("current pixelfomat: %s", current_pixel_format.c_str());
-            
-            callback_data.counter = 0;
-            callback_data.pub = &pub;
-            callback_data.params = &params;
-		    callback_data.done = FALSE;
-		    callback_data.stream = NULL;
-            callback_data.pixel_format = arv_camera_get_pixel_format_as_string(camera, &error);
-            arv_camera_set_acquisition_mode(camera, ARV_ACQUISITION_MODE_CONTINUOUS, &error);
-            
+    if (connected) {
+        int width;
+        int height;
+        double gain;
+        std::string current_pixel_format = "unKnown";
+    
+        ROS_INFO("opening camera %s", arv_camera_get_model_name(camera, NULL));
+    
+        update_camera_params(camera, &error);
+        if (!error) width = arv_camera_get_integer(camera, "Width", &error);
+        if (!error) height = arv_camera_get_integer(camera, "Height", &error);
+        if (!error) current_pixel_format = arv_camera_get_pixel_format_as_string(camera, &error);
+        if (!error && params.gain > 0) gain = arv_camera_get_float(camera, "Gain", &error);
+    
+        ROS_INFO("resolution: %d x %d", width, height);
+        if (params.gain > 0) ROS_INFO("Gain: %lf", gain);
+        ROS_INFO("current pixelformat: %s", current_pixel_format.c_str());
+    
+        callback_data.counter = 0;
+        callback_data.pub = &pub;
+        callback_data.params = &params;
+        callback_data.done = FALSE;
+        callback_data.stream = NULL;
+        callback_data.pixel_format = arv_camera_get_pixel_format_as_string(camera, &error);
+    
+        arv_camera_set_acquisition_mode(camera, ARV_ACQUISITION_MODE_CONTINUOUS, &error);
+    
+        if (error == NULL)
+            callback_data.stream = arv_camera_create_stream(camera, stream_callback, &callback_data, &error);
+    
+        g_object_set(callback_data.stream,
+                     "socket-buffer", ARV_GV_STREAM_SOCKET_BUFFER_AUTO,
+                     "socket-buffer-size", 0,
+                     NULL);
+    
+        if (ARV_IS_STREAM(callback_data.stream)) {
+            size_t payload = arv_camera_get_payload(camera, &error);
+            ROS_INFO("payload size: %ld", payload);
+            callback_data.payload = payload;
+    
+            if (error == NULL) {
+                for (int i = 0; i < params.buffer_num; i++)
+                    arv_stream_push_buffer(callback_data.stream, arv_buffer_new(payload, NULL));
+            }
+    
             if (error == NULL)
-			/* Create the stream object with callback */
-			    callback_data.stream = arv_camera_create_stream(camera, stream_callback, &callback_data, &error);
-                g_object_set(callback_data.stream,
-                    "socket-buffer", ARV_GV_STREAM_SOCKET_BUFFER_AUTO,
-                    "socket-buffer-size", 0,
-                    NULL);
-
-            if(ARV_IS_STREAM(callback_data.stream)) {
-                /* Retrieve the payload size for buffer creation */
-                size_t payload = arv_camera_get_payload(camera, &error);
-                ROS_INFO("payload size: %ld", payload);
-                callback_data.payload = payload;
-                if (error == NULL) {
-                    /* Insert some buffers in the stream buffer pool */
-                    for (int i = 0; i < params.buffer_num; i++)
-                        arv_stream_push_buffer (callback_data.stream, arv_buffer_new (payload, NULL));
-                }
-
-                if (error == NULL)
-                    /* Start the acquisition */
-                    arv_camera_start_acquisition (camera, &error);
-                    
-                
-                if (error == NULL){
-                    ROS_INFO("start acquisition!");
-                    signal(SIGINT, mySigintHandler);
-                    ros::spin();
-                }
-		    } else {
-                ROS_ERROR("%s not stream!",params.identify_str.c_str());
+                arv_camera_start_acquisition(camera, &error);
+    
+            if (error == NULL) {
+                ROS_INFO("start acquisition!");
+                signal(SIGINT, mySigintHandler);
+                ros::spin();
             }
         } else {
-            ROS_ERROR("%s not camera!",params.identify_str.c_str());
+            ROS_ERROR("%s not stream!", params.identify_str.c_str());
         }
     } else {
-        ROS_ERROR("camera: %s not found!",params.identify_str.c_str());
+        ROS_ERROR("camera: %s not found!", params.identify_str.c_str());
     }
 }
