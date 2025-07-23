@@ -1,6 +1,9 @@
 <launch>
-    <node name="hkcam_node" pkg="genicam" type="genicam_node" output="screen" >
-        <param name="publish_topic" type="string" value="camera_front"/>
+    <arg name="camera_name" default="None" />
+    <arg name="identify_str" default="None" />
+    <arg name="publish_topic" default="None" />
+    <node name="$(arg camera_name)_node" pkg="genicam" type="genicam_node" output="screen" >
+        <param name="publish_topic" type="string" value="$(arg publish_topic)"/>
         <!-- 开启PTP同步之后可以使用device时间 -->
         <param name="enable_ptp" type="bool" value="False" />
         <param name="use_device_time" type="bool" value="False" />
@@ -10,7 +13,7 @@
         <param name="gev_packet_size" type="int" value="8164" />
         <param name="gev_packet_delay" type="int" value="20" />
         <param name="buffer_num" type="int" value="2" /> 
-        <param name="identify_str" type="string" value="Hikrobot-MV-CS020-10GC-DA2690447"/>
+        <param name="identify_str" type="string" value="$(arg identify_str)"/>
         <param name="pixel_format" type="string" value="BayerRG8" />
         <param name="binning_h" type="int" value="2" />
         <param name="binning_w" type="int" value="2" />
