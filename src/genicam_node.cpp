@@ -285,19 +285,37 @@ int main(int argc, char **argv){
     image_transport::Publisher pub = it.advertise(params.publish_topic, 5);
     ROS_INFO("publish_topic: %s",params.publish_topic.c_str());
     // std::cout << params.binning_h << std::endl; 
+    const double timeout_sec = 3.0;
     arv_update_device_list();
     int n_devices = arv_get_n_devices();
     int found_device_id = -1;
+    ros::Time start_time = ros::Time::now();
     
-    for(int i = 0;i < n_devices;++i){
-        std::string device_string = std::string(arv_get_device_id(i)) + " (" + arv_get_device_address(i)+")";
-        // std::cout << device_id << std::endl;
-        ROS_INFO("found camera: %s",device_string.c_str());
-        if(device_string.find(params.identify_str) != std::string::npos){
-            ROS_INFO("match identify_str: %s",params.identify_str.c_str());
-            found_device_id = i;
+    ROS_INFO("Waiting for camera with IP: %s", params.identify_str.c_str());
+    
+    while ((ros::Time::now() - start_time).toSec() < timeout_sec) {
+
+    
+        for(int i = 0;i < n_devices;++i){
+            std::string device_string = std::string(arv_get_device_id(i)) + " (" + arv_get_device_address(i)+")";
+            // std::cout << device_id << std::endl;
+            ROS_INFO("found camera: %s",device_string.c_str());
+            if(device_string.find(params.identify_str) != std::string::npos){
+                ROS_INFO("match identify_str: %s",params.identify_str.c_str());
+                found_device_id = i;
+                break;
+            }
         }
+        if (found_device_id != -1) break;
+        // ros::Duration(0.2).sleep();
     }
+    
+    if (found_device_id == -1) {
+        ROS_ERROR("Timeout: Camera with IP %s not found after %.1f seconds.", params.identify_str.c_str(), timeout_sec);
+        return -1;
+    }
+    
+    ROS_INFO("Successfully initialized camera from IP: %s", params.identify_str.c_str());
     if(found_device_id != -1){
         ArvDevice* camera_device = arv_open_device(arv_get_device_id(found_device_id), &error);
         camera = arv_camera_new_with_device(camera_device, &error);
