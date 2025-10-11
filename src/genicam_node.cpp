@@ -177,6 +177,7 @@ static void set_enum_params(ArvCamera* camera, std::string feature_name, std::st
     } else {
         ROS_ERROR("camera does not support %s!",set_value.c_str());
     }
+    ros::Duration(0.5).sleep();
 }
 
 static void set_camera_int(ArvCamera* camera, std::string feature, int value, GError** error){
