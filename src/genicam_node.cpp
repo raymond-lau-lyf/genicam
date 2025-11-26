@@ -49,9 +49,27 @@ void process_image_buffer(ArvBuffer *buffer, ArvStreamCallbackData* callback_dat
         int img_h = arv_buffer_get_image_height(buffer);
         size_t data_size;
         const void* data = arv_buffer_get_image_data(buffer, &data_size);
-        uint64_t device_time_stamp = arv_buffer_get_timestamp(buffer) - (uint64_t)callback_data->params->tai_ahead * CONVERT_NANO;
+        uint64_t device_time_stamp = arv_buffer_get_timestamp(buffer);
+        if (callback_data->params->tai_ahead)
+            device_time_stamp = device_time_stamp - (uint64_t)callback_data->params->tai_ahead * CONVERT_NANO;
         uint64_t system_time_stamp = arv_buffer_get_system_timestamp(buffer);
-        uint64_t time_stamp = callback_data->params->use_device_time ? device_time_stamp: system_time_stamp;
+
+        /* Choose timestamp:
+         * - If use_device_time == true: use device timestamp (corrected by tai_ahead)
+         * - Else: prefer the buffer's system timestamp (when supported by Aravis)
+         *         if system timestamp is 0 (not supported), fall back to ros::Time::now()
+         */
+        uint64_t time_stamp = 0;
+        if (callback_data->params->use_device_time) {
+            time_stamp = device_time_stamp;
+        } else {
+            if (system_time_stamp != 0) {
+                time_stamp = system_time_stamp;
+            } else {
+                ROS_WARN_THROTTLE(10, "arv_buffer_get_system_timestamp returned 0; falling back to ros::Time::now()");
+                time_stamp = ros::Time::now().toNSec();
+            }
+        }
         // ROS_INFO("time_diff: %ld",device_time_stamp - system_time_stamp);
         // uint64_t time_stamp = system_time_stamp;
         // ROS_INFO("device_time_stamp: %ld", device_time_stamp);
