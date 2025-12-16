@@ -327,7 +327,7 @@ int main(int argc, char **argv){
             
             if (error == NULL)
 			/* Create the stream object with callback */
-			    callback_data.stream = arv_camera_create_stream(camera, stream_callback, &callback_data, &error);
+			    callback_data.stream = arv_camera_create_stream(camera, stream_callback, &callback_data, NULL, &error);
                 g_object_set(callback_data.stream,
                     "socket-buffer", ARV_GV_STREAM_SOCKET_BUFFER_AUTO,
                     "socket-buffer-size", 0,

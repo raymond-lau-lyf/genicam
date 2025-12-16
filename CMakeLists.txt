@@ -17,7 +17,7 @@ find_package(catkin REQUIRED COMPONENTS
 
 find_package(PkgConfig REQUIRED)                                                                                                            
                                                                                                                                             
-set(PKGC_DEPENDENCIES "aravis-0.8")                                                                                                            
+set(PKGC_DEPENDENCIES "aravis-0.10")                                                                                                            
 pkg_check_modules(DEPS REQUIRED IMPORTED_TARGET ${PKGC_DEPENDENCIES})
 
 ## System dependencies are found with CMake's conventions
