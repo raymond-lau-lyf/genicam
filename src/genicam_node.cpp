@@ -6,13 +6,27 @@
 #include <map>
 #include <chrono>
 #include <image_transport/image_transport.h>
+#include <signal.h>
+#include <atomic>
+#include <mutex>
 
 const uint64_t CONVERT_NANO = 1000000000L;
 
+// 重试配置常量
+const int MAX_RETRY_COUNT = 5;
+const int RETRY_DELAY_MS = 500;
+const int CLEANUP_DELAY_MS = 300;
+const int DISCOVERY_DELAY_MS = 200;
+
 std::set<std::string>supported_format = {"YUV422_8", "BayerRG8", "Mono8", "Mono16"};
 
+// 全局清理状态标志
+static std::atomic<bool> g_cleanup_done(false);
+static std::mutex g_cleanup_mutex;
+
 struct cam_params {
-    std::string identify_str;
+    std::string identify_str;  // 保留兼容，但不再用于设备发现
+    std::string camera_ip;     // 新增：相机 IP 直连地址
     std::string pixel_format;
     std::string palette;
     std::string publish_topic;
@@ -29,6 +43,8 @@ struct cam_params {
     int gev_packet_size, gev_packet_delay;
     int buffer_num;
     int tai_ahead;
+    int retry_count;           // 新增：重试次数配置
+    int retry_delay_ms;        // 新增：重试延时配置
 } params;
 
 
@@ -238,26 +254,112 @@ static void update_camera_params(ArvCamera* camera, GError** error){
 }
 
 GError* error = NULL;
-ArvCamera* camera;
+ArvCamera* camera = NULL;
+ArvDevice* camera_device = NULL;
 ArvStreamCallbackData callback_data;
 
-void mySigintHandler(int sig){
-    if (error == NULL && camera){
-        /* Stop the acquisition */
-        arv_camera_stop_acquisition(camera, &error);
-        ros::Duration(0.3).sleep();
-        g_clear_object (&callback_data.stream);
+/**
+ * 统一的资源清理函数
+ * 确保在任何退出路径中都能正确释放资源
+ * 清理顺序严格遵循：stop acquisition -> wait -> stream -> camera -> device -> aravis shutdown -> opencv
+ */
+void cleanup_resources() {
+    std::lock_guard<std::mutex> lock(g_cleanup_mutex);
+    
+    // 防止重复清理
+    if (g_cleanup_done.exchange(true)) {
+        ROS_INFO("Cleanup already performed, skipping...");
+        return;
     }
+    
+    ROS_INFO("Starting resource cleanup...");
+    GError* cleanup_error = NULL;
+    
+    // 1. 停止相机采集
+    if (camera != NULL && ARV_IS_CAMERA(camera)) {
+        ROS_INFO("Stopping camera acquisition...");
+        arv_camera_stop_acquisition(camera, &cleanup_error);
+        if (cleanup_error != NULL) {
+            ROS_WARN("Error stopping acquisition: %s", cleanup_error->message);
+            g_clear_error(&cleanup_error);
+        }
+    }
+    
+    // 2. 等待 UDP/stream 线程退出
+    ROS_INFO("Waiting for stream threads to exit...");
+    ros::Duration(CLEANUP_DELAY_MS / 1000.0).sleep();
+    
+    // 3. 释放 stream 对象
+    if (callback_data.stream != NULL) {
+        ROS_INFO("Releasing stream object...");
+        g_clear_object(&callback_data.stream);
+        callback_data.stream = NULL;
+    }
+    
+    // 4. 释放 camera 对象
+    if (camera != NULL) {
+        ROS_INFO("Releasing camera object...");
+        g_clear_object(&camera);
+        camera = NULL;
+    }
+    
+    // 5. device 对象由 camera 管理，不需要单独释放
+    // 注意：arv_camera_get_device 返回的是内部引用，camera 释放时会自动处理
+    camera_device = NULL;
+    
+    // 6. 调用 Aravis shutdown
+    ROS_INFO("Shutting down Aravis...");
     arv_shutdown();
+    
+    // 7. 关闭 OpenCV 窗口
+    ROS_INFO("Closing OpenCV windows...");
     cv::destroyAllWindows();
+    
+    ROS_INFO("Resource cleanup completed.");
+}
+
+/**
+ * 统一的信号处理函数
+ * 处理 SIGINT (Ctrl+C), SIGHUP (终端关闭), SIGTERM (roslaunch stop)
+ */
+void signal_handler(int sig) {
+    const char* sig_name = "UNKNOWN";
+    switch(sig) {
+        case SIGINT:  sig_name = "SIGINT";  break;
+        case SIGHUP:  sig_name = "SIGHUP";  break;
+        case SIGTERM: sig_name = "SIGTERM"; break;
+    }
+    ROS_WARN("Received signal %s (%d), initiating cleanup...", sig_name, sig);
+    
+    cleanup_resources();
     ros::shutdown();
+    
+    // 对于 SIGTERM/SIGHUP，确保进程退出
+    if (sig == SIGTERM || sig == SIGHUP) {
+        _exit(0);
+    }
+}
+
+/**
+ * ROS shutdown 回调
+ * 确保 ROS 正常 shutdown 时也执行清理
+ */
+void ros_shutdown_callback(int sig) {
+    ROS_INFO("ROS shutdown callback triggered.");
+    cleanup_resources();
 }
 
 int main(int argc, char **argv){
-    ros::init(argc, argv, "thermal_camera");
+    ros::init(argc, argv, "thermal_camera", ros::init_options::NoSigintHandler);
     ros::NodeHandle nh;
     ros::NodeHandle private_nh("~");
 
+    // 注册多种信号处理
+    signal(SIGINT, signal_handler);
+    signal(SIGHUP, signal_handler);
+    signal(SIGTERM, signal_handler);
+
+    // 原有参数
     private_nh.param<std::string>("identify_str", params.identify_str, "None");
     private_nh.param<std::string>("pixel_format", params.pixel_format, "None");
     private_nh.param<int>("binning_h", params.binning_h, -1);
@@ -277,6 +379,12 @@ int main(int argc, char **argv){
     private_nh.param<bool>("externalsync", params.externalsync, false);
     private_nh.param<bool>("triggermode", params.triggermode, false);
     private_nh.param<int>("tai_ahead", params.tai_ahead, 0);
+    
+    // 新增参数：IP 直连模式
+    private_nh.param<std::string>("camera_ip", params.camera_ip, "");
+    private_nh.param<int>("retry_count", params.retry_count, MAX_RETRY_COUNT);
+    private_nh.param<int>("retry_delay_ms", params.retry_delay_ms, RETRY_DELAY_MS);
+    
     if(params.use_device_time){
         ROS_WARN("Device Timestamp enabled. Make sure the time is synchronized!");
     }
@@ -284,83 +392,244 @@ int main(int argc, char **argv){
     image_transport::ImageTransport it(nh);
     image_transport::Publisher pub = it.advertise(params.publish_topic, 5);
     ROS_INFO("publish_topic: %s",params.publish_topic.c_str());
-    // std::cout << params.binning_h << std::endl; 
-    arv_update_device_list();
-    int n_devices = arv_get_n_devices();
-    int found_device_id = -1;
     
-    for(int i = 0;i < n_devices;++i){
-        std::string device_string = std::string(arv_get_device_id(i)) + " (" + arv_get_device_address(i)+")";
-        // std::cout << device_id << std::endl;
-        ROS_INFO("found camera: %s",device_string.c_str());
-        if(device_string.find(params.identify_str) != std::string::npos){
-            ROS_INFO("match identify_str: %s",params.identify_str.c_str());
-            found_device_id = i;
+    // ========== Aravis 初始化和稳定化 ==========
+    ROS_INFO("Initializing Aravis library...");
+    
+    // 启动前延时，确保之前的实例完全释放
+    ros::Duration(DISCOVERY_DELAY_MS / 1000.0).sleep();
+    
+    bool device_opened = false;
+    
+    // ========== IP 直连模式（推荐） ==========
+    if (!params.camera_ip.empty()) {
+        ROS_INFO("Using IP direct connection mode: %s", params.camera_ip.c_str());
+        
+        // 带重试的设备打开
+        for (int retry = 0; retry < params.retry_count && !device_opened; ++retry) {
+            if (retry > 0) {
+                ROS_WARN("Retry %d/%d: waiting %d ms before reconnect...", 
+                         retry, params.retry_count, params.retry_delay_ms);
+                ros::Duration(params.retry_delay_ms / 1000.0).sleep();
+            }
+            
+            GError* open_error = NULL;
+            
+            // 直接通过 IP 打开相机（绕过 device list）
+            camera = arv_camera_new(params.camera_ip.c_str(), &open_error);
+            
+            if (open_error != NULL) {
+                ROS_WARN("Failed to open camera at %s: %s", 
+                         params.camera_ip.c_str(), open_error->message);
+                g_clear_error(&open_error);
+                camera = NULL;
+                continue;
+            }
+            
+            if (ARV_IS_CAMERA(camera)) {
+                camera_device = arv_camera_get_device(camera);
+                device_opened = true;
+                ROS_INFO("Successfully connected to camera at %s", params.camera_ip.c_str());
+            } else {
+                ROS_WARN("arv_camera_new returned non-camera object for %s", params.camera_ip.c_str());
+                if (camera != NULL) {
+                    g_clear_object(&camera);
+                    camera = NULL;
+                }
+            }
+        }
+        
+        if (!device_opened) {
+            ROS_ERROR("Failed to open camera at %s after %d retries!", 
+                      params.camera_ip.c_str(), params.retry_count);
+            cleanup_resources();
+            return -1;
         }
     }
-    if(found_device_id != -1){
-        ArvDevice* camera_device = arv_open_device(arv_get_device_id(found_device_id), &error);
-        camera = arv_camera_new_with_device(camera_device, &error);
-        // arv_camera_gv_set_packet_size(camera, 8169, &error);
-        if(ARV_IS_CAMERA(camera)){
-            int width;
-		    int height;
-            double gain;
-		    std::string current_pixel_format = "unKnown";
-            ROS_INFO("opening camera %s", arv_camera_get_model_name (camera, NULL));
-            update_camera_params(camera, &error);
-            if (!error) width = arv_camera_get_integer(camera, "Width", &error);
-            if (!error) height = arv_camera_get_integer(camera, "Height", &error);
-            if (!error) current_pixel_format = arv_camera_get_pixel_format_as_string(camera, &error);
-            if (!error && params.gain > 0) gain = arv_camera_get_float(camera, "Gain", &error);
-            ROS_INFO("resolution: %d x %d", width, height);
-            if (params.gain > 0) ROS_INFO("Gain: %lf", gain);
-            ROS_INFO("current pixelfomat: %s", current_pixel_format.c_str());
-            
-            callback_data.counter = 0;
-            callback_data.pub = &pub;
-            callback_data.params = &params;
-		    callback_data.done = FALSE;
-		    callback_data.stream = NULL;
-            callback_data.pixel_format = arv_camera_get_pixel_format_as_string(camera, &error);
-            arv_camera_set_acquisition_mode(camera, ARV_ACQUISITION_MODE_CONTINUOUS, &error);
-            
-            if (error == NULL)
-			/* Create the stream object with callback */
-			    callback_data.stream = arv_camera_create_stream(camera, stream_callback, &callback_data, &error);
-                g_object_set(callback_data.stream,
-                    "socket-buffer", ARV_GV_STREAM_SOCKET_BUFFER_AUTO,
-                    "socket-buffer-size", 0,
-                    NULL);
-
-            if(ARV_IS_STREAM(callback_data.stream)) {
-                /* Retrieve the payload size for buffer creation */
-                size_t payload = arv_camera_get_payload(camera, &error);
-                ROS_INFO("payload size: %ld", payload);
-                callback_data.payload = payload;
-                if (error == NULL) {
-                    /* Insert some buffers in the stream buffer pool */
-                    for (int i = 0; i < params.buffer_num; i++)
-                        arv_stream_push_buffer (callback_data.stream, arv_buffer_new (payload, NULL));
-                }
-
-                if (error == NULL)
-                    /* Start the acquisition */
-                    arv_camera_start_acquisition (camera, &error);
-                    
-                
-                if (error == NULL){
-                    ROS_INFO("start acquisition!");
-                    signal(SIGINT, mySigintHandler);
-                    ros::spin();
-                }
-		    } else {
-                ROS_ERROR("%s not stream!",params.identify_str.c_str());
+    // ========== 兼容模式：使用 identify_str 扫描（不推荐） ==========
+    else if (params.identify_str != "None") {
+        ROS_WARN("Using legacy device scan mode (identify_str). Consider using camera_ip for better stability.");
+        
+        for (int retry = 0; retry < params.retry_count && !device_opened; ++retry) {
+            if (retry > 0) {
+                ROS_WARN("Retry %d/%d: waiting %d ms before rescan...", 
+                         retry, params.retry_count, params.retry_delay_ms);
+                ros::Duration(params.retry_delay_ms / 1000.0).sleep();
             }
-        } else {
-            ROS_ERROR("%s not camera!",params.identify_str.c_str());
+            
+            // 刷新设备列表前等待
+            ros::Duration(DISCOVERY_DELAY_MS / 1000.0).sleep();
+            arv_update_device_list();
+            
+            int n_devices = arv_get_n_devices();
+            ROS_INFO("Device scan attempt %d: found %d devices", retry + 1, n_devices);
+            
+            int found_device_id = -1;
+            for(int i = 0; i < n_devices; ++i){
+                std::string device_string = std::string(arv_get_device_id(i)) + " (" + arv_get_device_address(i)+")";
+                ROS_INFO("  Device %d: %s", i, device_string.c_str());
+                if(device_string.find(params.identify_str) != std::string::npos){
+                    ROS_INFO("  -> Matched identify_str: %s", params.identify_str.c_str());
+                    found_device_id = i;
+                    break;  // 找到第一个匹配的就停止
+                }
+            }
+            
+            if(found_device_id != -1){
+                GError* open_error = NULL;
+                camera_device = arv_open_device(arv_get_device_id(found_device_id), &open_error);
+                
+                if (open_error != NULL) {
+                    ROS_WARN("Failed to open device: %s", open_error->message);
+                    g_clear_error(&open_error);
+                    continue;
+                }
+                
+                camera = arv_camera_new_with_device(camera_device, &open_error);
+                
+                if (open_error != NULL) {
+                    ROS_WARN("Failed to create camera: %s", open_error->message);
+                    g_clear_error(&open_error);
+                    if (camera_device != NULL) {
+                        g_clear_object(&camera_device);
+                        camera_device = NULL;
+                    }
+                    continue;
+                }
+                
+                if(ARV_IS_CAMERA(camera)){
+                    device_opened = true;
+                    ROS_INFO("Successfully opened camera: %s", params.identify_str.c_str());
+                }
+            }
+        }
+        
+        if (!device_opened) {
+            ROS_ERROR("Camera %s not found after %d retries!", 
+                      params.identify_str.c_str(), params.retry_count);
+            cleanup_resources();
+            return -1;
         }
     } else {
-        ROS_ERROR("camera: %s not found!",params.identify_str.c_str());
+        ROS_ERROR("No camera_ip or identify_str specified! Please set one of them.");
+        cleanup_resources();
+        return -1;
     }
+    
+    // ========== 相机配置和 Stream 创建 ==========
+    // 此时 camera 对象已成功创建
+    
+    int width = 0;
+    int height = 0;
+    double gain_value = 0.0;
+    std::string current_pixel_format = "unKnown";
+    
+    ROS_INFO("Opening camera: %s", arv_camera_get_model_name(camera, NULL));
+    update_camera_params(camera, &error);
+    
+    if (!error) width = arv_camera_get_integer(camera, "Width", &error);
+    if (!error) height = arv_camera_get_integer(camera, "Height", &error);
+    if (!error) current_pixel_format = arv_camera_get_pixel_format_as_string(camera, &error);
+    if (!error && params.gain > 0) gain_value = arv_camera_get_float(camera, "Gain", &error);
+    
+    ROS_INFO("Resolution: %d x %d", width, height);
+    if (params.gain > 0) ROS_INFO("Gain: %lf", gain_value);
+    ROS_INFO("Current pixel format: %s", current_pixel_format.c_str());
+    
+    // 初始化 callback_data
+    callback_data.counter = 0;
+    callback_data.pub = &pub;
+    callback_data.params = &params;
+    callback_data.done = FALSE;
+    callback_data.stream = NULL;
+    callback_data.pixel_format = arv_camera_get_pixel_format_as_string(camera, &error);
+    
+    if (error != NULL) {
+        ROS_ERROR("Failed to get pixel format: %s", error->message);
+        cleanup_resources();
+        return -1;
+    }
+    
+    arv_camera_set_acquisition_mode(camera, ARV_ACQUISITION_MODE_CONTINUOUS, &error);
+    
+    if (error != NULL) {
+        ROS_ERROR("Failed to set acquisition mode: %s", error->message);
+        cleanup_resources();
+        return -1;
+    }
+    
+    // 带重试的 Stream 创建
+    bool stream_created = false;
+    for (int retry = 0; retry < params.retry_count && !stream_created; ++retry) {
+        if (retry > 0) {
+            ROS_WARN("Stream creation retry %d/%d, waiting %d ms...", 
+                     retry, params.retry_count, params.retry_delay_ms);
+            ros::Duration(params.retry_delay_ms / 1000.0).sleep();
+        }
+        
+        GError* stream_error = NULL;
+        callback_data.stream = arv_camera_create_stream(camera, stream_callback, &callback_data, &stream_error);
+        
+        if (stream_error != NULL) {
+            ROS_WARN("Failed to create stream: %s", stream_error->message);
+            g_clear_error(&stream_error);
+            continue;
+        }
+        
+        if (ARV_IS_STREAM(callback_data.stream)) {
+            g_object_set(callback_data.stream,
+                "socket-buffer", ARV_GV_STREAM_SOCKET_BUFFER_AUTO,
+                "socket-buffer-size", 0,
+                NULL);
+            stream_created = true;
+            ROS_INFO("Stream created successfully.");
+        } else {
+            ROS_WARN("Stream object is not valid.");
+            if (callback_data.stream != NULL) {
+                g_clear_object(&callback_data.stream);
+                callback_data.stream = NULL;
+            }
+        }
+    }
+    
+    if (!stream_created) {
+        ROS_ERROR("Failed to create stream after %d retries!", params.retry_count);
+        cleanup_resources();
+        return -1;
+    }
+    
+    // 获取 payload 并创建 buffer
+    size_t payload = arv_camera_get_payload(camera, &error);
+    if (error != NULL) {
+        ROS_ERROR("Failed to get payload: %s", error->message);
+        cleanup_resources();
+        return -1;
+    }
+    
+    ROS_INFO("Payload size: %ld", payload);
+    callback_data.payload = payload;
+    
+    // 向 stream buffer pool 添加 buffer
+    for (int i = 0; i < params.buffer_num; i++) {
+        arv_stream_push_buffer(callback_data.stream, arv_buffer_new(payload, NULL));
+    }
+    
+    // 启动采集
+    arv_camera_start_acquisition(camera, &error);
+    if (error != NULL) {
+        ROS_ERROR("Failed to start acquisition: %s", error->message);
+        cleanup_resources();
+        return -1;
+    }
+    
+    ROS_INFO("Acquisition started successfully!");
+    ROS_INFO("Camera driver is running. Press Ctrl+C to stop.");
+    
+    // 进入 ROS 事件循环
+    ros::spin();
+    
+    // 正常退出时的清理（通常由 signal handler 或 on_shutdown 完成）
+    cleanup_resources();
+    
+    return 0;
 }
