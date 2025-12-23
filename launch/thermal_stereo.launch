@@ -1,0 +1,67 @@
+<launch>
+    <!-- 双目热成像相机同步节点 -->
+    
+    <!-- 左相机 IP -->
+    <arg name="camera_ip_left" default="192.168.4.16" />
+    <!-- 右相机 IP -->
+    <arg name="camera_ip_right" default="192.168.3.15" />
+    
+    <!-- 发布话题 -->
+    <arg name="publish_topic_left" default="thermal_left" />
+    <arg name="publish_topic_right" default="thermal_right" />
+    
+    <!-- 同步配置 -->
+    <!-- sync_strategy: "first" (推荐), "average", "left", "right" -->
+    <arg name="sync_strategy" default="first" />
+    <!-- 帧配对超时(ms)，默认25ms，给网络抖动留余量，同时保证不会错位 -->
+    <arg name="sync_timeout_ms" default="25" />
+    
+    <!-- 外部同步/触发 -->
+    <arg name="externalsync" default="True" />
+    <arg name="triggermode" default="False" />
+    
+    <!-- 重试配置 -->
+    <arg name="retry_count" default="5" />
+    <arg name="retry_delay_ms" default="500" />
+    
+    <!-- 像素格式和调色板 -->
+    <arg name="pixel_format" default="YUV422_8" />
+    <arg name="palette" default="IronRed" />
+    
+    <node name="stereo_thermal_node" pkg="genicam" type="genicam_stereo_node" output="screen" >
+        <!-- 双目相机 IP -->
+        <param name="camera_ip_left" type="string" value="$(arg camera_ip_left)"/>
+        <param name="camera_ip_right" type="string" value="$(arg camera_ip_right)"/>
+        
+        <!-- 发布话题 -->
+        <param name="publish_topic_left" type="string" value="$(arg publish_topic_left)"/>
+        <param name="publish_topic_right" type="string" value="$(arg publish_topic_right)"/>
+        
+        <!-- 同步配置 -->
+        <param name="sync_strategy" type="string" value="$(arg sync_strategy)"/>
+        <param name="sync_timeout_ms" type="int" value="$(arg sync_timeout_ms)"/>
+        
+        <!-- 外部同步/触发 -->
+        <param name="externalsync" type="bool" value="$(arg externalsync)"/>
+        <param name="triggermode" type="bool" value="$(arg triggermode)"/>
+        
+        <!-- 重试配置 -->
+        <param name="retry_count" type="int" value="$(arg retry_count)"/>
+        <param name="retry_delay_ms" type="int" value="$(arg retry_delay_ms)"/>
+        
+        <!-- GEV 参数 -->
+        <param name="gev_packet_size" type="int" value="8228" />
+        
+        <!-- 显示/调试 -->
+        <param name="vis_img" type="bool" value="False"/>
+        
+        <!-- 像素格式 -->
+        <param name="pixel_format" type="string" value="$(arg pixel_format)" />
+        
+        <!-- Palette: IronRed比较好看, WhiteHot比较稳定 -->
+        <param name="palette" type="string" value="$(arg palette)" />
+        
+        <!-- Buffer 数量 -->
+        <param name="buffer_num" type="int" value="3" />
+    </node>
+</launch>
