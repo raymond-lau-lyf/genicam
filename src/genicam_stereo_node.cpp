@@ -73,6 +73,7 @@ struct stereo_cam_params {
     int buffer_num;
     int retry_count;
     int retry_delay_ms;
+    int auto_cal_time;  // 自动校准时间 (AutoCalTime)
 } params;
 
 // 待配对帧结构
@@ -443,6 +444,10 @@ static void configure_camera(ArvCamera* camera, const std::string& side, GError*
     if (params.gev_packet_delay != -1) 
         set_camera_int(camera, "GevSCPD", params.gev_packet_delay, error);
     
+    // AutoCalTime (自动校准时间)
+    if (params.auto_cal_time >= 0) 
+        set_camera_int(camera, "AutoCalTime", params.auto_cal_time, error);
+    
     // External sync
     bool can_esync = arv_camera_is_feature_available(camera, "ExternalSyncEnable", error);
     if (can_esync && params.externalsync) {
@@ -680,6 +685,7 @@ int main(int argc, char** argv) {
     private_nh.param<int>("buffer_num", params.buffer_num, 2);
     private_nh.param<int>("retry_count", params.retry_count, DEFAULT_RETRY_COUNT);
     private_nh.param<int>("retry_delay_ms", params.retry_delay_ms, DEFAULT_RETRY_DELAY_MS);
+    private_nh.param<int>("auto_cal_time", params.auto_cal_time, 15);
     
     // 参数检查
     if (params.camera_ip_left.empty() || params.camera_ip_right.empty()) {

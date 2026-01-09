@@ -28,6 +28,9 @@
     <arg name="pixel_format" default="YUV422_8" />
     <arg name="palette" default="IronRed" />
     
+    <!-- 自动校准时间 (秒) -->
+    <arg name="auto_cal_time" default="15" />
+
     <node name="stereo_thermal_node" pkg="genicam" type="genicam_stereo_node" output="screen" >
         <!-- 双目相机 IP -->
         <param name="camera_ip_left" type="string" value="$(arg camera_ip_left)"/>
@@ -63,5 +66,8 @@
         
         <!-- Buffer 数量 -->
         <param name="buffer_num" type="int" value="3" />
+        
+        <!-- 自动校准时间 -->
+        <param name="auto_cal_time" type="int" value="$(arg auto_cal_time)" />
     </node>
 </launch>
