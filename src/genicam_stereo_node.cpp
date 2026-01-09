@@ -24,6 +24,8 @@
 #include <mutex>
 #include <condition_variable>
 #include <queue>
+#include <deque>
+#include <std_msgs/Time.h>
 
 const uint64_t CONVERT_NANO = 1000000000L;
 const uint64_t CONVERT_MICRO = 1000000L;
@@ -43,6 +45,66 @@ std::set<std::string> supported_format = {"YUV422_8", "BayerRG8", "Mono8", "Mono
 // 全局清理状态标志
 static std::atomic<bool> g_cleanup_done(false);
 static std::mutex g_cleanup_mutex;
+
+// PTP 触发时间戳支持 - 队列机制
+static const int TRIGGER_QUEUE_SIZE = 8;  // 保存最近 N 个触发时间
+static std::atomic<bool> g_use_ptp_trigger(false);
+static std::mutex g_trigger_time_mutex;
+static std::deque<ros::Time> g_trigger_time_queue;  // 触发时间队列
+static uint64_t g_trigger_receive_count = 0;
+
+void trigger_time_callback(const std_msgs::Time::ConstPtr& msg) {
+    std::lock_guard<std::mutex> lock(g_trigger_time_mutex);
+    
+    // 添加到队列
+    g_trigger_time_queue.push_back(msg->data);
+    
+    // 保持队列大小
+    while (g_trigger_time_queue.size() > TRIGGER_QUEUE_SIZE) {
+        g_trigger_time_queue.pop_front();
+    }
+    
+    g_trigger_receive_count++;
+    
+    // 每50次打印一次状态
+    if (g_trigger_receive_count % 50 == 0) {
+        ros::Time now = ros::Time::now();
+        double latency_ms = (now - msg->data).toSec() * 1000.0;
+        ROS_INFO("TriggerSync: received %lu triggers, queue_size=%zu, PTP=%u.%09u, latency=%.2fms",
+                 g_trigger_receive_count, g_trigger_time_queue.size(), 
+                 msg->data.sec, msg->data.nsec, latency_ms);
+    }
+}
+
+// 根据系统时间戳从队列中找到最匹配的 PTP 触发时间
+ros::Time find_best_trigger_time(uint64_t sys_timestamp_ns) {
+    std::lock_guard<std::mutex> lock(g_trigger_time_mutex);
+    
+    if (g_trigger_time_queue.empty()) {
+        return ros::Time(0);  // 无效
+    }
+    
+    ros::Time sys_time;
+    sys_time.fromNSec(sys_timestamp_ns);
+    
+    // 找到与 sys_time 最接近且在其之前的触发时间
+    // （因为触发时间应该在图像到达之前）
+    ros::Time best_trigger(0);
+    double min_diff = 1e9;  // 很大的值
+    
+    for (const auto& trigger_time : g_trigger_time_queue) {
+        // 触发时间应该在系统时间之前（图像传输需要时间）
+        double diff_ms = (sys_time - trigger_time).toSec() * 1000.0;
+        
+        // 合理范围：0ms < diff < 60ms（触发到图像到达的延迟）
+        if (diff_ms > 0 && diff_ms < 60.0 && diff_ms < min_diff) {
+            min_diff = diff_ms;
+            best_trigger = trigger_time;
+        }
+    }
+    
+    return best_trigger;
+}
 
 // 立体相机参数结构
 struct stereo_cam_params {
@@ -196,7 +258,30 @@ private:
     }
     
     void publish_stereo_pair(const cv::Mat& left_img, const cv::Mat& right_img, uint64_t unified_ts) {
-        ros::Time stamp = ros::Time().fromNSec(unified_ts);
+        ros::Time stamp;
+        ros::Time sys_stamp = ros::Time().fromNSec(unified_ts);
+        
+        // 判断是否使用 PTP 触发时间戳
+        if (g_use_ptp_trigger.load()) {
+            // 使用队列机制查找最佳匹配的触发时间
+            ros::Time best_trigger = find_best_trigger_time(unified_ts);
+            
+            if (best_trigger.toSec() > 0) {
+                stamp = best_trigger;
+                // 计算系统时间与 PTP 时间的差值，用于调试
+                double diff_ms = (sys_stamp - stamp).toSec() * 1000.0;
+                if (pair_success_count_ % 25 == 0) {
+                    ROS_INFO("StereoSync: using PTP trigger time, sys-ptp_diff=%.2fms (transmission delay)",
+                             diff_ms);
+                }
+            } else {
+                // PTP 时间戳不可用，回退到系统时间戳
+                stamp = sys_stamp;
+                ROS_WARN_THROTTLE(1.0, "StereoSync: no matching PTP trigger found, using system time");
+            }
+        } else {
+            stamp = sys_stamp;
+        }
         
         // 发布左图
         sensor_msgs::ImagePtr left_msg = cv_bridge::CvImage(std_msgs::Header(), "rgb8", left_img).toImageMsg();
@@ -687,6 +772,11 @@ int main(int argc, char** argv) {
     private_nh.param<int>("retry_delay_ms", params.retry_delay_ms, DEFAULT_RETRY_DELAY_MS);
     private_nh.param<int>("auto_cal_time", params.auto_cal_time, 15);
     
+    // PTP 触发同步参数
+    bool use_ptp_trigger = false;
+    private_nh.param<bool>("use_ptp_trigger", use_ptp_trigger, false);
+    g_use_ptp_trigger.store(use_ptp_trigger);
+    
     // 参数检查
     if (params.camera_ip_left.empty() || params.camera_ip_right.empty()) {
         ROS_ERROR("Both camera_ip_left and camera_ip_right must be specified!");
@@ -700,12 +790,20 @@ int main(int argc, char** argv) {
     ROS_INFO("Right topic: %s", params.publish_topic_right.c_str());
     ROS_INFO("Sync strategy: %s", params.sync_strategy.c_str());
     ROS_INFO("Sync timeout: %d ms", params.sync_timeout_ms);
+    ROS_INFO("Use PTP trigger: %s", use_ptp_trigger ? "YES" : "NO");
     ROS_INFO("=========================================");
     
     // ========== 创建 Publisher ==========
     image_transport::ImageTransport it(nh);
     image_transport::Publisher pub_left = it.advertise(params.publish_topic_left, 5);
     image_transport::Publisher pub_right = it.advertise(params.publish_topic_right, 5);
+    
+    // ========== 订阅 PTP 触发时间戳 ==========
+    ros::Subscriber sub_trigger_time;
+    if (use_ptp_trigger) {
+        sub_trigger_time = nh.subscribe("/sync/trigger_time", 10, trigger_time_callback);
+        ROS_INFO("Subscribed to /sync/trigger_time for PTP trigger synchronization");
+    }
     
     // 配置帧同步器
     g_stereo_sync.set_publishers(&pub_left, &pub_right);

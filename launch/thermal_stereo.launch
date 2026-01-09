@@ -30,6 +30,9 @@
     
     <!-- 自动校准时间 (秒) -->
     <arg name="auto_cal_time" default="15" />
+    
+    <!-- PTP 触发时间戳同步 (需要先启动 sync_trigger_node) -->
+    <arg name="use_ptp_trigger" default="false" />
 
     <node name="stereo_thermal_node" pkg="genicam" type="genicam_stereo_node" output="screen" >
         <!-- 双目相机 IP -->
@@ -43,6 +46,9 @@
         <!-- 同步配置 -->
         <param name="sync_strategy" type="string" value="$(arg sync_strategy)"/>
         <param name="sync_timeout_ms" type="int" value="$(arg sync_timeout_ms)"/>
+        
+        <!-- PTP 触发时间戳同步 -->
+        <param name="use_ptp_trigger" type="bool" value="$(arg use_ptp_trigger)"/>
         
         <!-- 外部同步/触发 -->
         <param name="externalsync" type="bool" value="$(arg externalsync)"/>
