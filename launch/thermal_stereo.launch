@@ -28,8 +28,8 @@
     <arg name="pixel_format" default="YUV422_8" />
     <arg name="palette" default="IronRed" />
     
-    <!-- 自动校准时间 (秒) -->
-    <arg name="auto_cal_time" default="15" />
+    <!-- 自动校准时间 (min) -->
+    <arg name="auto_cal_time" default="30" />
     
     <!-- PTP 触发时间戳同步 (需要先启动 sync_trigger_node) -->
     <arg name="use_ptp_trigger" default="false" />
