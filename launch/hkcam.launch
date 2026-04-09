@@ -10,15 +10,14 @@
         <param name="gev_packet_size" type="int" value="8164" />
         <param name="gev_packet_delay" type="int" value="20" />
         <param name="buffer_num" type="int" value="2" /> 
-        <param name="identify_str" type="string" value="Hikrobot-MV-CS020-10GC-DA2690447"/>
+        <param name="identify_str" type="string" value="Hikrobot-MV-CS020-10GC-DA5335399"/>
         <param name="pixel_format" type="string" value="BayerRG8" />
         <param name="binning_h" type="int" value="2" />
         <param name="binning_w" type="int" value="2" />
-        <param name="exposure_auto" type="string" value="Off" /> <!--Off/Once/Continuous-->
+        <param name="exposure_auto" type="string" value="Continuous" /> <!--Off/Once/Continuous-->
         <param name="exposure_time" type="double" value="4000" />
-        <param name="gain_auto" type="string" value="Off" /> <!--Off/Once/Continuous-->
+        <param name="gain_auto" type="string" value="Continuous" /> <!--Off/Once/Continuous-->
         <param name="gain" type="double" value="5" />
-        <param name="triggermode" type="bool" value="True" />
+        <param name="triggermode" type="bool" value="False" />
     </node>
 </launch>
-
